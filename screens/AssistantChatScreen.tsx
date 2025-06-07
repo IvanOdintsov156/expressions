@@ -8,9 +8,12 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
+  ViewStyle,
 } from 'react-native';
 import { Text, IconButton, useTheme, Avatar, Appbar } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import LottieView from 'lottie-react-native';
+import DynamicGradient from '../elements/DynamicGradient';
 import axios from 'axios';
 import { useThemeContext } from '../context/ThemeContext';
 import { supabase } from '../lib/supabase';
@@ -18,11 +21,21 @@ import dayjs from 'dayjs';
 import { Toast } from '../elements/toast';
 
 type Message = {
-  id: string;
-  text: string;
+  id: string; // Ensure id is always present
+  text?: string;
   created_at: string;
   role: 'user' | 'assistant';
+  type?: 'typing' | 'message'; // Explicitly mark regular messages
 };
+
+type DateSeparator = {
+  id: string;
+  type: 'date_separator';
+  date: string; // YYYY-MM-DD
+  label: string; // "Today", "Yesterday", "Month D, YYYY"
+};
+
+type ListItemType = Message | DateSeparator;
 
 type Emotion = {
   emotion: string;
@@ -44,7 +57,7 @@ const API_CONFIG = {
 const ChatScreen = ({ navigation }: { navigation: any }) => {
   const theme = useTheme();
   const { isDark } = useThemeContext();
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]); // This will still hold only raw messages
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
@@ -201,11 +214,27 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
         created_at: new Date().toISOString()
       };
 
-      // Сохранение сообщения пользователя
+      // Add user message to state first
       const savedUserMessage = await saveMessage(userMessage);
       if (savedUserMessage) {
-        setMessages(prev => [...prev, savedUserMessage]);
+        // Ensure savedUserMessage has type 'message' if not already set
+        setMessages(prev => [...prev, { ...savedUserMessage, type: 'message' }]);
+      } else {
+        // If saving user message fails, don't proceed
+        setIsLoading(false);
+        showToast('Ошибка сохранения вашего сообщения');
+        return;
       }
+
+      // Add typing indicator
+      const typingIndicatorMessage: Message = { // Explicitly Message type
+        id: 'TYPING_INDICATOR',
+        role: 'assistant',
+        type: 'typing',
+        created_at: new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, typingIndicatorMessage]);
+      flatListRef.current?.scrollToEnd({ animated: true });
 
       // Формирование контекста
       const emotionsContext = emotions
@@ -226,69 +255,185 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
         }
       });
 
+      // Remove typing indicator before adding new message or handling error
+      setMessages(prev => prev.filter(msg => msg.id !== 'TYPING_INDICATOR'));
+
       // Сохранение ответа ассистента
-      const assistantMessage = {
+      const assistantMessageData = {
         text: response.data?.result || 'Не удалось получить ответ',
         role: 'assistant' as const,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        type: 'message' as const, // Add type for assistant message
       };
 
-      const savedAssistantMessage = await saveMessage(assistantMessage);
+      const savedAssistantMessage = await saveMessage(assistantMessageData);
       if (savedAssistantMessage) {
-        setMessages(prev => [...prev, savedAssistantMessage]);
-        setTimeout(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        }, 100);
+        setMessages(prev => [...prev, { ...savedAssistantMessage, type: 'message' }]);
+      } else {
+        // If saving assistant message fails, show a temporary error message in chat
+        const errorResponseMessage: Message = { // Explicitly Message type
+          id: `error-${new Date().getTime()}`,
+          text: 'Ошибка: Ответ ассистента не был сохранен.',
+          role: 'assistant',
+          created_at: new Date().toISOString(),
+          type: 'message',
+        };
+        setMessages(prev => [...prev, errorResponseMessage]);
       }
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
 
     } catch (error) {
+      setMessages(prev => prev.filter(msg => msg.id !== 'TYPING_INDICATOR'));
       showToast('Ошибка отправки сообщения');
       console.error('Send message error:', error);
+      const errorChatMessage: Message = { // Explicitly Message type
+        id: `error-chat-${new Date().getTime()}`,
+        text: 'Не удалось получить ответ от ассистента.',
+        role: 'assistant',
+        created_at: new Date().toISOString(),
+        type: 'message',
+      };
+      setMessages(prev => [...prev, errorChatMessage]);
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
     } finally {
       setInputText('');
       setIsLoading(false);
     }
-  }, [inputText, emotions]);
+  }, [inputText, emotions, saveMessage, showToast]);
+
+  const processedMessagesWithSeparators = useMemo(() => {
+    const items: ListItemType[] = [];
+    let lastDateStamp: string | null = null;
+
+    // Ensure messages are sorted by created_at. Supabase query already does this.
+    // If messages were not pre-sorted, you'd sort them here.
+    // const sortedMessages = [...messages].sort((a, b) => dayjs(a.created_at).valueOf() - dayjs(b.created_at).valueOf());
+
+    messages.forEach(message => {
+      // Typing indicators don't get date separators and are handled by their own logic in renderMessage
+      if (message.type === 'typing') {
+        items.push(message);
+        return;
+      }
+
+      const currentDate = dayjs(message.created_at);
+      const currentDateStamp = currentDate.format('YYYY-MM-DD');
+
+      if (currentDateStamp !== lastDateStamp) {
+        let label = '';
+        if (currentDate.isSame(dayjs(), 'day')) {
+          label = 'Today';
+        } else if (currentDate.isSame(dayjs().subtract(1, 'day'), 'day')) {
+          label = 'Yesterday';
+        } else {
+          label = currentDate.format('MMMM D, YYYY');
+        }
+        items.push({
+          id: `sep-${currentDateStamp}`,
+          type: 'date_separator',
+          date: currentDateStamp,
+          label: label,
+        });
+        lastDateStamp = currentDateStamp;
+      }
+      // Ensure all messages pushed have a 'type', default to 'message' if not present
+      items.push({ ...message, type: message.type || 'message' });
+    });
+    return items;
+  }, [messages]);
 
   // Рендер сообщений
-  const renderMessage = useCallback(({ item }: { item: Message }) => (
-    <View style={[
-      styles.messageContainer,
-      item.role === 'user' 
-        ? styles.userContainer 
-        : styles.assistantContainer
-    ]}>
-      {item.role === 'assistant' && (
-        <Avatar.Icon 
-          size={36} 
-          icon="robot-happy"
-          style={[styles.avatar, { backgroundColor: theme.colors.surfaceVariant }]}
+  const renderMessage = useCallback(({ item }: { item: ListItemType }) => {
+    if (item.type === 'date_separator') {
+      return (
+        <View style={styles.separatorContainer}>
+          <View style={styles.separatorBubble}>
+            <Text style={styles.separatorText}>{item.label}</Text>
+          </View>
+        </View>
+      );
+    }
+
+    // Handle typing indicator separately as it's not a standard message bubble
+    if (item.type === 'typing') {
+      // Cast item to Message for typing indicator specific rendering
+      const currentItem = item as Message;
+      return (
+        <View style={[styles.messageContainer, styles.assistantContainer]}>
+          <Avatar.Icon
+            size={36}
+            icon="robot-happy"
+            style={[styles.avatar, { backgroundColor: theme.colors.surfaceVariant }]}
+            color={theme.colors.primary}
+          />
+          <View style={[
+            styles.bubbleBase,
+            styles.assistantBubbleContainer,
+            styles.typingIndicatorBubble,
+          ]}>
+            <DynamicGradient style={styles.gradientBubbleContent}>
+              <LottieView
+                source={require('../assets/animations/robot-animation.json')}
+                autoPlay
+                loop
+                style={styles.lottieIndicator}
+              />
+            </DynamicGradient>
+          </View>
+        </View>
+      );
+    }
+
+    // Standard message rendering (casting to Message type)
+    const currentMessage = item as Message;
+
+    return (
+      <View style={[
+        styles.messageContainer,
+        currentMessage.role === 'user'
+          ? styles.userContainer
+          : styles.assistantContainer
+      ]}>
+        {currentMessage.role === 'assistant' && (
+          <Avatar.Icon
+            size={36}
+            icon="robot-happy"
+            style={[styles.avatar, { backgroundColor: theme.colors.surfaceVariant }]}
+            color={theme.colors.primary}
+          />
+        )}
+        <View style={[
+          styles.bubbleBase,
+            currentMessage.role === 'user' ? styles.userBubbleContainer : styles.assistantBubbleContainer
+        ]}>
+          <DynamicGradient style={styles.gradientBubbleContent}>
+            <Text style={[
+              styles.messageText,
+              {
+                color: theme.dark ? theme.colors.onSurface : theme.colors.onSurface
+              }
+            ]}>
+                {currentMessage.text}
+            </Text>
+            <Text style={[styles.time, {
+              color: theme.dark ? theme.colors.onSurfaceVariant : theme.colors.onSurfaceVariant
+            }]}>
+                {dayjs(currentMessage.created_at).format('HH:mm')}
+            </Text>
+          </DynamicGradient>
+        </View>
+        {currentMessage.role === 'user' && (
+        <Avatar.Icon
+          size={36}
+          icon="account-circle"
+          style={[styles.avatar, styles.userAvatar, { backgroundColor: theme.colors.surfaceVariant }]}
           color={theme.colors.primary}
         />
       )}
-      
-      <View style={[
-        styles.bubble,
-        { 
-          backgroundColor: item.role === 'user' 
-            ? theme.colors.primary 
-            : theme.colors.surfaceVariant
-        }
-      ]}>
-        <Text style={[
-          styles.messageText,
-          { 
-            color: item.role === 'user' 
-              ? theme.colors.onPrimary 
-              : theme.colors.onSurface 
-          }
-        ]}>
-          {item.text}
-        </Text>
-        <Text style={[styles.time, { color: theme.colors.outline }]}>
-          {dayjs(item.created_at).format('HH:mm')}
-        </Text>
-      </View>
     </View>
   ), [theme]);
 
@@ -317,15 +462,35 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
     assistantContainer: {
       justifyContent: 'flex-start',
     },
-    bubble: {
+    bubbleBase: { // Outer container for the bubble
       maxWidth: '80%',
+      elevation: 2,
+      // Margins if necessary, or handled by messageContainer's gap
+    },
+    gradientBubbleContent: { // Styles for the DynamicGradient component
       padding: 12,
       borderRadius: 16,
-      elevation: 2,
+      // flex: 1, // If DynamicGradient needs to expand within bubbleBase
+    },
+    userBubbleContainer: { // Specific layout for user bubble container if needed
+      // e.g., if bubbleBase needs different margins/alignment
+    },
+    assistantBubbleContainer: { // Specific layout for assistant bubble container if needed
+      // e.g., if bubbleBase needs different margins/alignment
     },
     messageText: {
       fontSize: 16,
       lineHeight: 22,
+    },
+    typingIndicatorBubble: {
+      // Adjust padding or size for the Lottie animation if needed
+      // For example, if DynamicGradient adds too much padding by default for a small animation
+      maxWidth: '30%', // Example: make it smaller than regular text bubbles
+    },
+    lottieIndicator: {
+      width: 60, // Adjust size as needed
+      height: 40, // Adjust size as needed
+      alignSelf: 'center',
     },
     time: {
       fontSize: 12,
@@ -338,11 +503,11 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
       padding: 8,
       borderTopWidth: 1,
       borderColor: theme.colors.outline,
-      backgroundColor: theme.colors.background,
+      backgroundColor: theme.colors.elevation.level1, // Changed from theme.colors.background
     },
     input: {
       flex: 1,
-      backgroundColor: theme.colors.surface,
+      backgroundColor: theme.colors.surface, // Will evaluate this against elevation.level1
       borderRadius: 24,
       paddingHorizontal: 16,
       marginRight: 8,
@@ -352,6 +517,10 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
     },
     avatar: {
       marginRight: 8,
+    },
+    userAvatar: {
+      marginLeft: 8,
+      marginRight: 0, // Reset marginRight for user avatar
     },
     loadingContainer: {
       padding: 16,
@@ -382,7 +551,7 @@ const ChatScreen = ({ navigation }: { navigation: any }) => {
         <View style={styles.container}>
           <FlatList
             ref={flatListRef}
-            data={messages}
+            data={processedMessagesWithSeparators}
             renderItem={renderMessage}
             keyExtractor={item => item.id}
             contentContainerStyle={styles.listContainer}
