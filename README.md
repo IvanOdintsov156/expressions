@@ -1,3 +1,5 @@
+[For the Russian version, please see README.ru.md](README.ru.md)
+
 # Expressions: Emotion Tracking & AI Assistant
 
 Expressions is a mobile application designed to help users explore, understand, and reflect on their emotions. It combines facial emotion recognition technology with an AI-powered chat assistant to provide a unique and personal experience for emotional well-being.
